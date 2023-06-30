@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.3.4", features = ["cargo"]}
+fs_extra = "1.3.0"
 futures = "0.3.28"
 paris = {version = "1.5", features = ["macros"]}
 rand = "0.8.5"

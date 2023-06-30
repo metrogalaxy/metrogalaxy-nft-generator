@@ -1,9 +1,13 @@
-use clap::{arg, command, value_parser, Command};
+use clap::{arg, command, value_parser, ArgAction, Command};
 use futures::stream::StreamExt;
 use paris::{error, info};
 use rand::distributions::WeightedIndex;
 use rand::prelude::*;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::fmt::Display;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 
 const TOTAL_BOYS: usize = 5000;
 const TOTAL_GIRLS: usize = 5000;
@@ -16,9 +20,27 @@ async fn main() {
 
     // parse cli
     let matches = command!()
+        .subcommand(
+            Command::new("generate-emotions")
+                .arg(
+                    arg!(--from <FILE> "From mapping file")
+                        .required(true)
+                        .value_parser(value_parser!(PathBuf)),
+                )
+                .arg(
+                    arg!(--"input-dir" <DIR> "Input directory path")
+                        .required(true)
+                        .value_parser(value_parser!(PathBuf)),
+                )
+                .arg(
+                    arg!(--"from-index" <INDEX> "From index")
+                        .required(false)
+                        .value_parser(value_parser!(usize)),
+                ),
+        )
         .arg(
             arg!(--"input-dir" <DIR> "Input directory path")
-                .required(true)
+                .required(false)
                 .value_parser(value_parser!(PathBuf)),
         )
         .arg(
@@ -27,7 +49,35 @@ async fn main() {
                 .default_value("output")
                 .value_parser(value_parser!(PathBuf)),
         )
+        .arg(
+            arg!(--reset <BOOL> "Reset generation")
+                .required(false)
+                .action(ArgAction::SetTrue),
+        )
         .get_matches();
+
+    match matches.subcommand() {
+        Some(("generate-emotions", args)) => {
+            if let Some(mapping_file) = args.get_one::<PathBuf>("from") {
+                info!("Generate emotions from mapping file {mapping_file:?}");
+
+                let input_dir = args
+                    .get_one::<PathBuf>("input-dir")
+                    .expect("Missing input dir");
+
+                let mut output_dir = PathBuf::from("emotions_girl");
+                if is_boy(&input_dir) {
+                    output_dir = PathBuf::from("emotions_boy");
+                }
+
+                let from_index = args.get_one::<usize>("from-index").unwrap_or(&0);
+
+                generate_emotions(mapping_file, input_dir, &output_dir, *from_index).await;
+                return;
+            }
+        }
+        _ => {}
+    }
 
     if let Some(dir) = matches.get_one::<PathBuf>("input-dir") {
         info!("Working on directory {dir:?}");
@@ -35,10 +85,12 @@ async fn main() {
         let output_dir = matches.get_one::<PathBuf>("output-dir").unwrap();
         info!("Output directory {:?}", output_dir);
 
+        let is_reset = matches.get_one::<bool>("reset").unwrap_or(&true);
+
         if is_boy(&dir) {
-            handle(&dir, &output_dir, Gender::Boy, TOTAL_BOYS).await;
+            handle(&dir, &output_dir, Gender::Boy, TOTAL_BOYS, *is_reset).await;
         } else {
-            handle(&dir, &output_dir, Gender::Girl, TOTAL_GIRLS).await;
+            handle(&dir, &output_dir, Gender::Girl, TOTAL_GIRLS, *is_reset).await;
         }
     }
 }
@@ -47,6 +99,19 @@ async fn main() {
 enum Gender {
     Boy,
     Girl,
+}
+
+impl Display for Gender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Gender::Boy => {
+                write!(f, "boy")
+            }
+            Gender::Girl => {
+                write!(f, "girl")
+            }
+        }
+    }
 }
 
 trait RandomizedPart {
@@ -88,6 +153,35 @@ impl RandomizedPart for Hand {
 }
 
 struct HairLong {}
+
+impl HairLong {
+    fn is_with_headphone(gender: Gender, variant: &str) -> bool {
+        match gender {
+            Gender::Boy => match variant {
+                "NFT_B_Hair_Long_2" | "NFT_B_Hair_Long_3" | "NFT_B_Hair_Long_4"
+                | "NFT_B_Hair_Long_7" | "NFT_B_Hair_Long_8" | "NFT_B_Hair_Long_9"
+                | "NFT_B_Hair_Long_10" | "NFT_B_Hair_Long_1" | "NFT_B_Hair_Long_5"
+                | "NFT_B_Hair_Long_6" => false,
+                _ => true,
+            },
+            Gender::Girl => match variant {
+                "NFT_G_Hair_Long_4" | "NFT_G_Hair_Long_5" | "NFT_G_Hair_Long_6"
+                | "NFT_G_Hair_Long_7" | "NFT_G_Hair_Long_8" | "NFT_G_Hair_Long_9"
+                | "NFT_G_Hair_Long_10" | "NFT_G_Hair_Long_13" | "NFT_G_Hair_Long_14"
+                | "NFT_G_Hair_Long_15" | "NFT_G_Hair_Long_16" | "NFT_G_Hair_Long_1"
+                | "NFT_G_Hair_Long_2" | "NFT_G_Hair_Long_3" | "NFT_G_Hair_Long_11"
+                | "NFT_G_Hair_Long_12" => false,
+                _ => true,
+            },
+        }
+    }
+    fn is_with_face_acc(variant: &str) -> bool {
+        match variant {
+            "NFT_B_Hair_Long_32" | "NFT_B_Hair_Long_33" | "NFT_B_Hair_Long_34" => false,
+            _ => true,
+        }
+    }
+}
 impl RandomizedPart for HairLong {
     fn random_part(gender: Gender) -> Option<&'static str> {
         match gender {
@@ -420,30 +514,6 @@ impl RandomizedPart for FaceAcc {
 struct Hair {}
 
 impl Hair {
-    fn is_with_headphone(gender: Gender, variant: &str) -> bool {
-        match gender {
-            Gender::Boy => match variant {
-                "NFT_B_Hair_2" | "NFT_B_Hair_3" | "NFT_B_Hair_4" | "NFT_B_Hair_7"
-                | "NFT_B_Hair_8" | "NFT_B_Hair_9" | "NFT_B_Hair_10" | "NFT_B_Hair_1"
-                | "NFT_B_Hair_5" | "NFT_B_Hair_6" => false,
-                _ => true,
-            },
-            Gender::Girl => match variant {
-                "NFT_G_Hair_4" | "NFT_G_Hair_5" | "NFT_G_Hair_6" | "NFT_G_Hair_7"
-                | "NFT_G_Hair_8" | "NFT_G_Hair_9" | "NFT_G_Hair_10" | "NFT_G_Hair_13"
-                | "NFT_G_Hair_14" | "NFT_G_Hair_15" | "NFT_G_Hair_16" | "NFT_G_Hair_1"
-                | "NFT_G_Hair_2" | "NFT_G_Hair_3" | "NFT_G_Hair_11" | "NFT_G_Hair_12" => false,
-                _ => true,
-            },
-        }
-    }
-    fn is_with_face_acc(variant: &str) -> bool {
-        match variant {
-            "NFT_B_Hair_32" | "NFT_B_Hair_33" | "NFT_B_Hair_34" => false,
-            _ => true,
-        }
-    }
-
     fn from_hair_long(hair_long: Option<&str>) -> Option<&'static str> {
         if let Some(hair_long) = hair_long {
             let mut arr: Vec<String> = hair_long
@@ -676,23 +746,141 @@ fn is_boy(dir_path: &PathBuf) -> bool {
     dir_str.contains("NFT_B")
 }
 
-async fn handle(input_dir: &PathBuf, output_dir: &PathBuf, gender: Gender, total: usize) {
+async fn handle(
+    input_dir: &PathBuf,
+    output_dir: &PathBuf,
+    gender: Gender,
+    total: usize,
+    is_reset: bool,
+) {
     std::fs::create_dir_all(output_dir).expect("Failed to create output directory");
-    let tasks = (1..=total).into_iter().map(|i| {
-        let metronion_parts = generate_random_metronion(gender);
-        info!("Metronion {i:?} with parts {:?}", metronion_parts);
 
+    let mapping = (1..=total)
+        .into_iter()
+        .map(|i| {
+            let metronion_parts = generate_random_metronion(gender);
+            info!("Metronion {i:?} with parts {:?}", metronion_parts);
+            metronion_parts
+        })
+        .collect::<Vec<Vec<String>>>();
+
+    let tasks = mapping.iter().enumerate().map(|(i, metronion_parts)| {
         tokio::spawn({
             let input_dir = input_dir.clone();
             let output_dir = output_dir.clone();
+            let metronion_parts = metronion_parts.clone();
             async move { magick_metronion(i, metronion_parts, input_dir, output_dir) }
         })
     });
-    info!("Number of metronions = {:?}", tasks);
+    info!("Number of metronions = {:?}", mapping.len());
+
+    // write mapping to file
+    let mapping_filepath = PathBuf::from(format!("mapping_{}.txt", gender));
+    if is_reset {
+        fs_extra::file::remove(mapping_filepath.clone()).expect("Failed to reset mapping file");
+    }
+    let mut file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(mapping_filepath.clone())
+        .expect("Failed to open the file.");
+    for (i, item) in mapping.iter().enumerate() {
+        writeln!(file, "{},{:?}", i + 1, item).expect("Failed to write");
+    }
+    info!("Write metronion mappings to file {mapping_filepath:?}");
 
     let mut stream = futures::stream::iter(tasks).buffered(BUFFER_SIZE);
 
     while let Some(result) = stream.next().await {}
+}
+
+async fn generate_emotions(
+    mapping_file: &PathBuf,
+    input_dir: &PathBuf,
+    output_dir: &PathBuf,
+    from_index: usize,
+) {
+    let file = File::open(mapping_file).expect("Failed to open the mapping file.");
+    let reader = BufReader::new(file);
+
+    info!("From index {from_index:?}");
+
+    let metronion_parts = reader
+        .lines()
+        .into_iter()
+        .filter_map(|line| {
+            let mut line = line.unwrap();
+            line = line
+                .replace(" ", "")
+                .replace("\"", "")
+                .replace("[", "")
+                .replace("]", "");
+
+            let mut line = line
+                .split(",")
+                .map(|item| item.to_string())
+                .collect::<Vec<String>>();
+
+            line.remove(0);
+            // remove Face and FaceAcc
+            line.retain(|item| !item.contains("Face"));
+            Some(line)
+        })
+        .collect::<Vec<Vec<String>>>();
+
+    let extended_metronion_parts = metronion_parts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            if index < from_index + 1 {
+                return None;
+            }
+            // add emotions
+            let mut result: Vec<Vec<String>> = vec![];
+            for i in 1..=10 {
+                if let Some(index) = item.iter().position(|item| item.contains("Clothes")) {
+                    let mut res = item.clone();
+                    res.insert(index + 1, format!("NFT_Emo_{i}"));
+                    result.push(res);
+                }
+            }
+            Some((index, result))
+        })
+        .collect::<Vec<(usize, Vec<Vec<String>>)>>();
+
+    // for metronion in metronion_parts {
+    //     info!("{:?}", metronion);
+    // }
+
+    let tasks = extended_metronion_parts
+        .into_iter()
+        .map(|(i, metronion_parts)| {
+            tokio::spawn({
+                let input_dir = input_dir.clone();
+                let output_dir = output_dir.clone();
+                let metronion_parts = metronion_parts.clone();
+                async move {
+                    for parts in metronion_parts {
+                        magick_emotions(i, parts, input_dir.clone(), output_dir.clone());
+                    }
+                }
+            })
+        });
+    info!("Number of metronions = {:?}", metronion_parts.len());
+
+    let mut stream = futures::stream::iter(tasks).buffered(BUFFER_SIZE);
+
+    while let Some(result) = stream.next().await {}
+}
+
+fn split_at_first<'a>(input: &'a str, pattern: &'a str) -> (&'a str, &'a str) {
+    if let Some(pos) = input.find(pattern) {
+        let (first, second) = input.split_at(pos);
+        let second = &second[pattern.len()..];
+        (first, second)
+    } else {
+        (input, "")
+    }
 }
 
 fn magick_metronion(index: usize, parts: Vec<String>, input_dir: PathBuf, output_dir: PathBuf) {
@@ -721,6 +909,44 @@ fn magick_metronion(index: usize, parts: Vec<String>, input_dir: PathBuf, output
     }
 }
 
+fn magick_emotions(index: usize, parts: Vec<String>, input_dir: PathBuf, output_dir: PathBuf) {
+    let output_dir = output_dir.join(format!("{index:}"));
+    std::fs::create_dir_all(&output_dir).expect("Failed to create output directory");
+
+    let emo_part_index = parts
+        .iter()
+        .position(|item| item.contains("NFT_Emo"))
+        .unwrap();
+    let emo_part = &parts[emo_part_index].to_owned();
+
+    let output_file = output_dir.join(format!("{index:}_{emo_part:}.png"));
+    let output_file_path = output_file.to_str().unwrap();
+
+    let inputs_path = parts
+        .into_iter()
+        .map(|part| {
+            let p = input_dir.join(format!("{part:}.png"));
+            p.to_str().unwrap().to_string()
+        })
+        .collect::<Vec<String>>();
+
+    let output = std::process::Command::new("magick")
+        .args(&["convert"])
+        .args(inputs_path)
+        .args(&["-background", "none", "-flatten", output_file_path])
+        .output()
+        .expect("Failed to execute command magic k");
+
+    if output.status.success() {
+        info!(
+            "Generate metronion {index:?} with emotions {:?} successfully!",
+            emo_part
+        );
+    } else {
+        error!("Command failed with exit code: {}", output.status);
+    }
+}
+
 fn generate_random_metronion(gender: Gender) -> Vec<String> {
     let mut hair_long_part_str: Option<&str> = None;
     let mut metronion_parts: Vec<String> = vec![];
@@ -739,7 +965,7 @@ fn generate_random_metronion(gender: Gender) -> Vec<String> {
             Parts::FaceAcc(_) => {
                 if matches!(gender, Gender::Boy)
                     && hair_long_part_str.is_some()
-                    && !Hair::is_with_face_acc(hair_long_part_str.unwrap())
+                    && !HairLong::is_with_face_acc(hair_long_part_str.unwrap())
                 {
                     None
                 } else {
@@ -749,7 +975,7 @@ fn generate_random_metronion(gender: Gender) -> Vec<String> {
             Parts::Hair(_) => Hair::from_hair_long(hair_long_part_str),
             Parts::HeadPhone(_) => {
                 if hair_long_part_str.is_some()
-                    && !Hair::is_with_headphone(gender, hair_long_part_str.unwrap())
+                    && !HairLong::is_with_headphone(gender, hair_long_part_str.unwrap())
                 {
                     None
                 } else {
